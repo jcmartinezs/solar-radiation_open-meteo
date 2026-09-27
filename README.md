@@ -4,15 +4,27 @@ Flask API that fetches solar radiation variables from **Open-Meteo** and stores 
 
 ## Local setup
 
-### 1) Create a virtualenv + install
+### 1) Create a virtualenv + install (uv)
 
 ```bash
 cd solar-radiation_open-meteo
+uv venv
+source .venv/bin/activate
+
+# Install from the lockfile (recommended)
+uv sync
+
+# Or install editable without the lockfile
+# uv pip install -e .
+```
+
+If you prefer classic `pip`:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -e .
-# (or) pip install -r requirements.txt
 ```
 
 ### 2) Configure environment
