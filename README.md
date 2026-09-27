@@ -50,6 +50,12 @@ flask --app solar_radiation_api:create_app init-db
 flask --app solar_radiation_api:create_app run --debug
 ```
 
+Landing page (browser-friendly):
+
+```bash
+open http://127.0.0.1:5000/
+```
+
 Health check:
 
 ```bash
@@ -196,6 +202,7 @@ docker-compose up --build
 API will be on:
 
 ```bash
+curl http://127.0.0.1:8000/
 curl http://127.0.0.1:8000/health
 ```
 
