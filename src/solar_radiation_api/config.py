@@ -37,6 +37,7 @@ def load_config() -> dict:
         "JSON_SORT_KEYS": False,
         "OPEN_METEO_PRODUCT": os.getenv("OPEN_METEO_PRODUCT", "archive").strip(),
         "OPEN_METEO_TIMEZONE": os.getenv("OPEN_METEO_TIMEZONE", "UTC").strip(),
+        "ADMIN_API_KEY": os.getenv("ADMIN_API_KEY", "").strip(),
         "PROPAGATE_EXCEPTIONS": True,
         "DEBUG": _truthy(os.getenv("FLASK_DEBUG")),
     }

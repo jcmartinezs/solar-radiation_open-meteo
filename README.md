@@ -46,6 +46,30 @@ curl http://127.0.0.1:5000/health
 
 ## Ingest Open-Meteo data
 
+This API uses **API keys**. You create users with an **admin key**, then users can ingest data.
+
+### 0) Create an API user
+
+1) Set `ADMIN_API_KEY` in your `.env`.
+
+2) Call the admin endpoint to create a user (choose an API key you will store securely):
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/users \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Key: YOUR_ADMIN_API_KEY' \
+  -d '{
+    "username": "alice",
+    "email": "alice@example.com",
+    "api_key": "alice-dev-key"
+  }'
+```
+
+3) Use that API key on ingestion calls:
+
+- `Authorization: Bearer <api_key>` (recommended)
+- or `X-API-Key: <api_key>`
+
 ### POST `/api/ingest/open-meteo`
 
 Example (hourly):
@@ -53,6 +77,7 @@ Example (hourly):
 ```bash
 curl -X POST http://127.0.0.1:5000/api/ingest/open-meteo \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer alice-dev-key' \
   -d '{
     "latitude": 4.7110,
     "longitude": -74.0721,
@@ -60,7 +85,21 @@ curl -X POST http://127.0.0.1:5000/api/ingest/open-meteo \
     "end_date": "2024-01-07",
     "timezone": "UTC",
     "product": "archive",
-    "hourly": ["shortwave_radiation", "direct_radiation", "diffuse_radiation"],
+    "hourly": [
+      "temperature_2m",
+      "terrestrial_radiation",
+      "global_tilted_irradiance",
+      "direct_normal_irradiance",
+      "diffuse_radiation",
+      "direct_radiation",
+      "shortwave_radiation",
+      "terrestrial_radiation_instant",
+      "global_tilted_irradiance_instant",
+      "direct_normal_irradiance_instant",
+      "diffuse_radiation_instant",
+      "direct_radiation_instant",
+      "shortwave_radiation_instant"
+    ],
     "daily": [],
     "replace_existing": true
   }'
@@ -68,8 +107,11 @@ curl -X POST http://127.0.0.1:5000/api/ingest/open-meteo \
 
 Notes:
 - `product`: `archive` (historical) or `forecast` (recent/future).
-- `hourly` / `daily`: pass any variable names supported by Open-Meteo for that endpoint.
+- `hourly`: if omitted or `[]`, the API uses the default list above and validates variables.
+- `daily`: you can pass Open-Meteo daily variable names (not validated yet).
 - `replace_existing=true` deletes matching existing rows (same lat/lon/interval/variable/time range) before inserting.
+
+Every measurement row stores who inserted it in `created_by_user_id` / `created_by_username`.
 
 ### GET `/api/measurements`
 

@@ -2,16 +2,36 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from flask import Blueprint, current_app, request
+from flask import Blueprint, current_app, g, request
 from sqlalchemy import and_
 from sqlalchemy.exc import IntegrityError
 
+from solar_radiation_api.auth import require_admin_key, require_api_key
 from solar_radiation_api.db import db
-from solar_radiation_api.models import Measurement
+from solar_radiation_api.models import Measurement, User
 from solar_radiation_api.open_meteo import OpenMeteoError, OpenMeteoRequest, fetch_timeseries
 
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+
+DEFAULT_HOURLY_VARIABLES: list[str] = [
+    "temperature_2m",
+    "terrestrial_radiation",
+    "global_tilted_irradiance",
+    "direct_normal_irradiance",
+    "diffuse_radiation",
+    "direct_radiation",
+    "shortwave_radiation",
+    "terrestrial_radiation_instant",
+    "global_tilted_irradiance_instant",
+    "direct_normal_irradiance_instant",
+    "diffuse_radiation_instant",
+    "direct_radiation_instant",
+    "shortwave_radiation_instant",
+]
+
+ALLOWED_HOURLY_VARIABLES: set[str] = set(DEFAULT_HOURLY_VARIABLES)
 
 
 def _parse_iso_datetime(value: str) -> datetime:
@@ -24,7 +44,9 @@ def _parse_iso_date_to_datetime(value: str) -> datetime:
     return datetime(d.year, d.month, d.day)
 
 
-def _payload_to_measurements(payload: dict, interval: str) -> tuple[list[Measurement], dict]:
+def _payload_to_measurements(
+    payload: dict, interval: str, *, created_by_user_id: int | None
+) -> tuple[list[Measurement], dict]:
     block = payload.get(interval) or {}
     time_key = block.get("time") or []
 
@@ -55,6 +77,7 @@ def _payload_to_measurements(payload: dict, interval: str) -> tuple[list[Measure
                     unit=str(unit) if unit is not None else None,
                     timestamp=ts,
                     value=float(v) if v is not None else None,
+                    created_by_user_id=created_by_user_id,
                 )
             )
 
@@ -67,6 +90,7 @@ def _payload_to_measurements(payload: dict, interval: str) -> tuple[list[Measure
 
 
 @api_bp.post("/ingest/open-meteo")
+@require_api_key
 def ingest_open_meteo():
     body = request.get_json(silent=True) or {}
 
@@ -78,10 +102,20 @@ def ingest_open_meteo():
     except (KeyError, ValueError, TypeError):
         return {"error": "latitude, longitude, start_date, end_date are required"}, 400
 
-    hourly = body.get("hourly") or []
+    hourly = body.get("hourly")
+    if hourly is None or hourly == []:
+        hourly = DEFAULT_HOURLY_VARIABLES
     daily = body.get("daily") or []
     if not isinstance(hourly, list) or not isinstance(daily, list):
         return {"error": "hourly and daily must be lists"}, 400
+
+    invalid_hourly = sorted({str(v) for v in hourly if str(v) not in ALLOWED_HOURLY_VARIABLES})
+    if invalid_hourly:
+        return {
+            "error": "Unsupported hourly variables",
+            "invalid_hourly": invalid_hourly,
+            "allowed_hourly": sorted(ALLOWED_HOURLY_VARIABLES),
+        }, 400
 
     product = str(body.get("product") or current_app.config.get("OPEN_METEO_PRODUCT", "archive"))
     timezone = str(body.get("timezone") or current_app.config.get("OPEN_METEO_TIMEZONE", "UTC"))
@@ -106,13 +140,15 @@ def ingest_open_meteo():
     inserted = 0
     meta: dict = {"hourly": None, "daily": None}
 
+    current_user_id = getattr(getattr(g, "current_user", None), "id", None)
+
     for interval in ("hourly", "daily"):
         if interval == "hourly" and not hourly:
             continue
         if interval == "daily" and not daily:
             continue
 
-        rows, interval_meta = _payload_to_measurements(payload, interval)
+        rows, interval_meta = _payload_to_measurements(payload, interval, created_by_user_id=current_user_id)
         meta[interval] = interval_meta
 
         if not rows:
@@ -166,6 +202,45 @@ def ingest_open_meteo():
         },
         "meta": meta,
     }
+
+
+@api_bp.get("/users/me")
+@require_api_key
+def get_me():
+    user = getattr(g, "current_user", None)
+    return {"user": user.to_dict() if user else None}
+
+
+@api_bp.post("/users")
+@require_admin_key
+def create_user():
+    body = request.get_json(silent=True) or {}
+
+    username = body.get("username")
+    api_key = body.get("api_key")
+    email = body.get("email")
+
+    if not username or not api_key:
+        return {"error": "username and api_key are required"}, 400
+
+    user = User(username=str(username).strip(), email=str(email).strip() if email else None)
+    user.set_api_key(str(api_key))
+
+    db.session.add(user)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return {"error": "username or email already exists"}, 409
+
+    return {"user": user.to_dict()}, 201
+
+
+@api_bp.get("/users")
+@require_admin_key
+def list_users():
+    users = db.session.query(User).order_by(User.id.asc()).all()
+    return {"count": len(users), "items": [u.to_dict() for u in users]}
 
 
 @api_bp.get("/measurements")
