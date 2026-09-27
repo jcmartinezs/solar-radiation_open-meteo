@@ -177,7 +177,29 @@ git push -u origin main
 
 ## Next steps (Docker)
 
-When you’re ready, we can add:
-- `Dockerfile` for the API
-- `docker-compose.yml` with a local MySQL container
-- production settings + deployment instructions
+### Run locally with Docker Compose
+
+This starts:
+- `db`: MySQL 8.0
+- `api`: Flask API (Gunicorn)
+
+```bash
+cd solar-radiation_open-meteo
+docker compose up --build
+```
+
+API will be on:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Defaults are defined in `docker-compose.yml` (including `ADMIN_API_KEY`). Change those before using outside local dev.
+
+### Deployment later
+
+When you’re ready to deploy to your server, we can reuse the same `Dockerfile` and provide:
+- a production `docker-compose.yml` (no public MySQL port)
+- persistent volumes
+- proper secrets management
+- reverse proxy (Caddy/Nginx) + TLS
