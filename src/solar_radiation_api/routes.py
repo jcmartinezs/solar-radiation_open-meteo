@@ -122,14 +122,14 @@ def ingest_open_meteo():
             min_ts = min(r.timestamp for r in rows)
             max_ts = max(r.timestamp for r in rows)
             variables = sorted({r.variable for r in rows})
-            tz = interval_meta.get("timezone")
+            tz = str(interval_meta.get("timezone") or timezone)
 
             db.session.query(Measurement).filter(
                 and_(
                     Measurement.source == "open-meteo",
                     Measurement.latitude == latitude,
                     Measurement.longitude == longitude,
-                    Measurement.timezone == str(tz),
+                    Measurement.timezone == tz,
                     Measurement.interval == interval,
                     Measurement.variable.in_(variables),
                     Measurement.timestamp >= min_ts,
