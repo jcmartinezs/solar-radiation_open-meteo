@@ -185,7 +185,12 @@ This starts:
 
 ```bash
 cd solar-radiation_open-meteo
-docker compose up --build
+
+# If you have the Docker Compose v2 plugin:
+# docker compose up --build
+
+# If you have the standalone docker-compose binary (common with Colima setups):
+docker-compose up --build
 ```
 
 API will be on:
