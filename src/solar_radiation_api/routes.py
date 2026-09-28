@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from solar_radiation_api.auth import require_admin_key, require_api_key
 from solar_radiation_api.db import db
-from solar_radiation_api.models import Measurement, User
+from solar_radiation_api.models import HourlyMeasurement, User
 from solar_radiation_api.open_meteo import OpenMeteoError, OpenMeteoRequest, fetch_timeseries
 
 
@@ -34,6 +34,23 @@ DEFAULT_HOURLY_VARIABLES: list[str] = [
 ALLOWED_HOURLY_VARIABLES: set[str] = set(DEFAULT_HOURLY_VARIABLES)
 
 
+_HOURLY_MODEL_COLUMNS: dict[str, str] = {
+    "temperature_2m": "temperature_2m",
+    "terrestrial_radiation": "terrestrial_radiation",
+    "global_tilted_irradiance": "global_tilted_irradiance",
+    "direct_normal_irradiance": "direct_normal_irradiance",
+    "diffuse_radiation": "diffuse_radiation",
+    "direct_radiation": "direct_radiation",
+    "shortwave_radiation": "shortwave_radiation",
+    "terrestrial_radiation_instant": "terrestrial_radiation_instant",
+    "global_tilted_irradiance_instant": "global_tilted_irradiance_instant",
+    "direct_normal_irradiance_instant": "direct_normal_irradiance_instant",
+    "diffuse_radiation_instant": "diffuse_radiation_instant",
+    "direct_radiation_instant": "direct_radiation_instant",
+    "shortwave_radiation_instant": "shortwave_radiation_instant",
+}
+
+
 def _parse_iso_datetime(value: str) -> datetime:
     # Handles "YYYY-MM-DDTHH:MM" and "YYYY-MM-DDTHH:MM:SS"
     return datetime.fromisoformat(value)
@@ -44,46 +61,86 @@ def _parse_iso_date_to_datetime(value: str) -> datetime:
     return datetime(d.year, d.month, d.day)
 
 
-def _payload_to_measurements(
-    payload: dict, interval: str, *, created_by_user_id: int | None
-) -> tuple[list[Measurement], dict]:
-    block = payload.get(interval) or {}
-    time_key = block.get("time") or []
+def _parse_area(body: dict) -> tuple[float, float, float, float, float, float]:
+    if "area" in body and isinstance(body["area"], dict):
+        a = body["area"]
+        lat_min = float(a["lat_min"])
+        lat_max = float(a["lat_max"])
+        lon_min = float(a["lon_min"])
+        lon_max = float(a["lon_max"])
+        lat = (lat_min + lat_max) / 2.0
+        lon = (lon_min + lon_max) / 2.0
+        return lat_min, lat_max, lon_min, lon_max, lat, lon
 
-    units = payload.get(f"{interval}_units") or {}
-    timezone = payload.get("timezone") or current_app.config.get("OPEN_METEO_TIMEZONE", "UTC")
+    lat = float(body["latitude"])
+    lon = float(body["longitude"])
+    return lat, lat, lon, lon, lat, lon
 
-    created: list[Measurement] = []
 
-    for variable, values in block.items():
-        if variable == "time":
-            continue
+def _normalize_zip_codes(body: dict) -> list[str] | None:
+    z = body.get("zip_codes")
+    if z is None:
+        return None
+    if isinstance(z, str):
+        z = [s.strip() for s in z.split(",") if s.strip()]
+    if not isinstance(z, list):
+        raise ValueError("zip_codes must be a list or comma-separated string")
+    out = []
+    for item in z:
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return sorted(set(out))
+
+
+def _payload_to_hourly_rows(
+    payload: dict,
+    *,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
+    zip_codes: list[str] | None,
+    requested_hourly: list[str],
+    created_by_user_id: int | None,
+) -> tuple[list[HourlyMeasurement], dict]:
+    block = payload.get("hourly") or {}
+    times: list[str] = block.get("time") or []
+
+    created: list[HourlyMeasurement] = []
+
+    series: dict[str, list] = {}
+    for variable in requested_hourly:
+        values = block.get(variable)
         if not isinstance(values, list):
             continue
+        series[variable] = values
 
-        unit = units.get(variable)
+    for idx, t in enumerate(times):
+        ts = _parse_iso_datetime(t)
+        row = HourlyMeasurement(
+            lat_min=lat_min,
+            lat_max=lat_max,
+            lon_min=lon_min,
+            lon_max=lon_max,
+            zip_codes=zip_codes,
+            timestamp=ts,
+            created_by_user_id=created_by_user_id,
+        )
 
-        # Open-Meteo gives hourly times as ISO datetimes and daily times as ISO dates.
-        for t, v in zip(time_key, values, strict=False):
-            ts = _parse_iso_datetime(t) if interval == "hourly" else _parse_iso_date_to_datetime(t)
-            created.append(
-                Measurement(
-                    source="open-meteo",
-                    latitude=float(payload["latitude"]),
-                    longitude=float(payload["longitude"]),
-                    timezone=str(timezone),
-                    interval=interval,
-                    variable=str(variable),
-                    unit=str(unit) if unit is not None else None,
-                    timestamp=ts,
-                    value=float(v) if v is not None else None,
-                    created_by_user_id=created_by_user_id,
-                )
-            )
+        for variable, values in series.items():
+            if idx >= len(values):
+                continue
+            v = values[idx]
+            column_name = _HOURLY_MODEL_COLUMNS.get(variable)
+            if not column_name:
+                continue
+            setattr(row, column_name, float(v) if v is not None else None)
+
+        created.append(row)
 
     meta = {
-        "interval": interval,
-        "timezone": timezone,
+        "interval": "hourly",
         "n": len(created),
     }
     return created, meta
@@ -95,19 +152,24 @@ def ingest_open_meteo():
     body = request.get_json(silent=True) or {}
 
     try:
-        latitude = float(body["latitude"])
-        longitude = float(body["longitude"])
         start_date = str(body["start_date"])
         end_date = str(body["end_date"])
-    except (KeyError, ValueError, TypeError):
-        return {"error": "latitude, longitude, start_date, end_date are required"}, 400
+        lat_min, lat_max, lon_min, lon_max, latitude, longitude = _parse_area(body)
+        zip_codes = _normalize_zip_codes(body)
+    except (KeyError, ValueError, TypeError) as e:
+        return {
+            "error": "Invalid request. Provide start_date/end_date and either latitude/longitude or area.",
+            "details": str(e),
+        }, 400
 
     hourly = body.get("hourly")
     if hourly is None or hourly == []:
         hourly = DEFAULT_HOURLY_VARIABLES
     daily = body.get("daily") or []
-    if not isinstance(hourly, list) or not isinstance(daily, list):
-        return {"error": "hourly and daily must be lists"}, 400
+    if daily:
+        return {"error": "daily ingestion is not supported by this schema (hourly only)"}, 400
+    if not isinstance(hourly, list):
+        return {"error": "hourly must be a list"}, 400
 
     invalid_hourly = sorted({str(v) for v in hourly if str(v) not in ALLOWED_HOURLY_VARIABLES})
     if invalid_hourly:
@@ -118,7 +180,8 @@ def ingest_open_meteo():
         }, 400
 
     product = str(body.get("product") or current_app.config.get("OPEN_METEO_PRODUCT", "archive"))
-    timezone = str(body.get("timezone") or current_app.config.get("OPEN_METEO_TIMEZONE", "UTC"))
+    # We store timestamps without timezone. Force UTC to keep them consistent.
+    timezone = "UTC"
     replace_existing = bool(body.get("replace_existing", True))
 
     req_obj = OpenMeteoRequest(
@@ -138,66 +201,67 @@ def ingest_open_meteo():
         return {"error": str(e)}, 502
 
     inserted = 0
-    meta: dict = {"hourly": None, "daily": None}
+    meta: dict = {"hourly": None}
 
     current_user_id = getattr(getattr(g, "current_user", None), "id", None)
 
-    for interval in ("hourly", "daily"):
-        if interval == "hourly" and not hourly:
-            continue
-        if interval == "daily" and not daily:
-            continue
+    rows, interval_meta = _payload_to_hourly_rows(
+        payload,
+        lat_min=lat_min,
+        lat_max=lat_max,
+        lon_min=lon_min,
+        lon_max=lon_max,
+        zip_codes=zip_codes,
+        requested_hourly=[str(x) for x in hourly],
+        created_by_user_id=current_user_id,
+    )
+    meta["hourly"] = interval_meta
 
-        rows, interval_meta = _payload_to_measurements(payload, interval, created_by_user_id=current_user_id)
-        meta[interval] = interval_meta
+    if not rows:
+        return {"inserted": 0, "meta": meta, "warning": "No hourly rows found"}
 
-        if not rows:
-            continue
+    if replace_existing:
+        min_ts = min(r.timestamp for r in rows)
+        max_ts = max(r.timestamp for r in rows)
+        db.session.query(HourlyMeasurement).filter(
+            and_(
+                HourlyMeasurement.lat_min == lat_min,
+                HourlyMeasurement.lat_max == lat_max,
+                HourlyMeasurement.lon_min == lon_min,
+                HourlyMeasurement.lon_max == lon_max,
+                HourlyMeasurement.timestamp >= min_ts,
+                HourlyMeasurement.timestamp <= max_ts,
+            )
+        ).delete(synchronize_session=False)
 
-        if replace_existing:
-            min_ts = min(r.timestamp for r in rows)
-            max_ts = max(r.timestamp for r in rows)
-            variables = sorted({r.variable for r in rows})
-            tz = str(interval_meta.get("timezone") or timezone)
+    try:
+        db.session.bulk_save_objects(rows)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return {
+            "error": "Insert failed due to duplicates. Try replace_existing=true.",
+        }, 409
 
-            db.session.query(Measurement).filter(
-                and_(
-                    Measurement.source == "open-meteo",
-                    Measurement.latitude == latitude,
-                    Measurement.longitude == longitude,
-                    Measurement.timezone == tz,
-                    Measurement.interval == interval,
-                    Measurement.variable.in_(variables),
-                    Measurement.timestamp >= min_ts,
-                    Measurement.timestamp <= max_ts,
-                )
-            ).delete(synchronize_session=False)
-
-        try:
-            db.session.bulk_save_objects(rows)
-            db.session.commit()
-        except IntegrityError:
-            db.session.rollback()
-            return {
-                "error": "Insert failed due to duplicates. Try replace_existing=true.",
-                "details": {
-                    "interval": interval,
-                },
-            }, 409
-
-        inserted += len(rows)
+    inserted += len(rows)
 
     return {
         "inserted": inserted,
         "request": {
             "latitude": latitude,
             "longitude": longitude,
+            "area": {
+                "lat_min": lat_min,
+                "lat_max": lat_max,
+                "lon_min": lon_min,
+                "lon_max": lon_max,
+            },
+            "zip_codes": zip_codes,
             "start_date": start_date,
             "end_date": end_date,
             "timezone": timezone,
             "product": product,
             "hourly": hourly,
-            "daily": daily,
             "replace_existing": replace_existing,
         },
         "meta": meta,
@@ -246,32 +310,38 @@ def list_users():
 @api_bp.get("/measurements")
 def list_measurements():
     # Filters
-    latitude = request.args.get("latitude", type=float)
-    longitude = request.args.get("longitude", type=float)
-    variable = request.args.get("variable")
-    interval = request.args.get("interval")
+    lat_min = request.args.get("lat_min", type=float)
+    lat_max = request.args.get("lat_max", type=float)
+    lon_min = request.args.get("lon_min", type=float)
+    lon_max = request.args.get("lon_max", type=float)
     start = request.args.get("start")
     end = request.args.get("end")
 
     limit = request.args.get("limit", default=500, type=int)
     limit = max(1, min(limit, 5000))
 
-    q = db.session.query(Measurement)
+    q = db.session.query(HourlyMeasurement)
 
-    if latitude is not None:
-        q = q.filter(Measurement.latitude == latitude)
-    if longitude is not None:
-        q = q.filter(Measurement.longitude == longitude)
-    if variable:
-        q = q.filter(Measurement.variable == variable)
-    if interval:
-        q = q.filter(Measurement.interval == interval)
+    if lat_min is not None:
+        q = q.filter(HourlyMeasurement.lat_min == lat_min)
+    if lat_max is not None:
+        q = q.filter(HourlyMeasurement.lat_max == lat_max)
+    if lon_min is not None:
+        q = q.filter(HourlyMeasurement.lon_min == lon_min)
+    if lon_max is not None:
+        q = q.filter(HourlyMeasurement.lon_max == lon_max)
 
     if start:
-        q = q.filter(Measurement.timestamp >= _parse_iso_datetime(start) if "T" in start else _parse_iso_date_to_datetime(start))
+        q = q.filter(
+            HourlyMeasurement.timestamp
+            >= (_parse_iso_datetime(start) if "T" in start else _parse_iso_date_to_datetime(start))
+        )
     if end:
-        q = q.filter(Measurement.timestamp <= _parse_iso_datetime(end) if "T" in end else _parse_iso_date_to_datetime(end))
+        q = q.filter(
+            HourlyMeasurement.timestamp
+            <= (_parse_iso_datetime(end) if "T" in end else _parse_iso_date_to_datetime(end))
+        )
 
-    q = q.order_by(Measurement.timestamp.asc()).limit(limit)
+    q = q.order_by(HourlyMeasurement.timestamp.asc()).limit(limit)
     items = [m.to_dict() for m in q.all()]
     return {"count": len(items), "items": items}

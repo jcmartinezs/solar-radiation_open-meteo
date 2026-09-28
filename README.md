@@ -97,11 +97,10 @@ curl -X POST http://127.0.0.1:5000/api/ingest/open-meteo \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer alice-dev-key' \
   -d '{
-    "latitude": 4.7110,
-    "longitude": -74.0721,
+    "area": {"lat_min": 4.70, "lat_max": 4.72, "lon_min": -74.09, "lon_max": -74.06},
+    "zip_codes": ["110111", "110121"],
     "start_date": "2024-01-01",
     "end_date": "2024-01-07",
-    "timezone": "UTC",
     "product": "archive",
     "hourly": [
       "temperature_2m",
@@ -118,7 +117,6 @@ curl -X POST http://127.0.0.1:5000/api/ingest/open-meteo \
       "direct_radiation_instant",
       "shortwave_radiation_instant"
     ],
-    "daily": [],
     "replace_existing": true
   }'
 ```
@@ -126,15 +124,15 @@ curl -X POST http://127.0.0.1:5000/api/ingest/open-meteo \
 Notes:
 - `product`: `archive` (historical) or `forecast` (recent/future).
 - `hourly`: if omitted or `[]`, the API uses the default list above and validates variables.
-- `daily`: you can pass Open-Meteo daily variable names (not validated yet).
-- `replace_existing=true` deletes matching existing rows (same lat/lon/interval/variable/time range) before inserting.
+- `daily`: not supported in the current schema (hourly rows only).
+- `replace_existing=true` deletes matching existing rows (same area + time range) before inserting.
 
-Every measurement row stores who inserted it in `created_by_user_id` / `created_by_username`.
+Each hourly row stores who inserted it in `created_by_user_id` / `created_by_username`.
 
 ### GET `/api/measurements`
 
 ```bash
-curl 'http://127.0.0.1:5000/api/measurements?latitude=4.711&longitude=-74.0721&variable=shortwave_radiation&interval=hourly&start=2024-01-01T00:00&end=2024-01-02T00:00&limit=200'
+curl 'http://127.0.0.1:5000/api/measurements?lat_min=4.70&lat_max=4.72&lon_min=-74.09&lon_max=-74.06&start=2024-01-01T00:00&end=2024-01-02T00:00&limit=200'
 ```
 
 ## Using your remote server (SSH tunnel)
@@ -196,6 +194,13 @@ cd solar-radiation_open-meteo
 # docker compose up --build
 
 # If you have the standalone docker-compose binary (common with Colima setups):
+docker-compose up --build
+```
+
+If you change the DB schema (tables/columns), reset the local MySQL volume:
+
+```bash
+docker-compose down -v
 docker-compose up --build
 ```
 
